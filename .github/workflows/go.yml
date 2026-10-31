@@ -66,7 +66,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -z "$(gofmt -l .)"
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
           race=(-race)
           if [[ "${{ matrix.goos }}/${{ matrix.goarch }}" == 'windows/arm64' ]]; then race=(); fi
           if [[ "$RUNNER_OS" == 'Linux' ]]; then

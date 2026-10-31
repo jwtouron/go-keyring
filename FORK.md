@@ -33,6 +33,9 @@ CI supplies an isolated Secret Service session. Windows ARM64 runs without the G
 detector. Actual hosted results and native Windows verification must be reported separately
 from cross-compilation or Wine checks.
 
+Text files check out with LF endings on every platform, including Windows, so formatting
+checks evaluate the source rather than the runner's Git newline conversion.
+
 The native CI matrix covers macOS/Linux/Windows x64 and ARM64. The weekly/manual upstream
 workflow proposes a merge on `sync/upstream` and dispatches its tests. Enable Actions and
 allow workflow-created pull requests in the fork's repository settings. Conflicts stop
