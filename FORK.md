@@ -1,13 +1,15 @@
 # Context-aware go-keyring
 
-This fork starts from Zalando v0.2.8 (`a8cdfe320cc8bc0534c895a648dc9214715a9da5`).
+This fork includes Zalando upstream through `66b55cc` (including the unreleased
+`ListUsers` API and Secret Service content-type detection).
 Its scope is context support and the tests/CI needed to maintain it. Original module and
 import paths remain `github.com/zalando/go-keyring`; consumers pin a replacement to a
 reviewed commit in `github.com/jwtouron/go-keyring`. Go 1.25+ is required.
 
 ## API and cancellation
 
-`GetWithContext`, `SetWithContext`, `DeleteWithContext`, and `DeleteAllWithContext`
+`GetWithContext`, `SetWithContext`, `DeleteWithContext`, `DeleteAllWithContext`, and
+`ListUsersWithContext`
 take `context.Context` first. Existing functions and the `Keyring` interface remain
 available; existing functions use a background context. `KeyringWithContext` describes
 the new methods. Missing entries retain `ErrNotFound`.

@@ -2,6 +2,8 @@ package keyring
 
 import (
 	"context"
+	"slices"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -109,13 +111,44 @@ func (k windowsKeychain) DeleteAllWithContext(ctx context.Context, service strin
 	return nil
 }
 
+// ListUsers returns a list of all users for a given service
+func (k windowsKeychain) ListUsersWithContext(ctx context.Context, service string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if service == "" {
+		return []string{}, nil
+	}
+
+	creds, err := wincred.List()
+	if err != nil {
+		return nil, err
+	}
+
+	prefix := k.credName(service, "")
+	var users []string
+
+	for _, cred := range creds {
+		if strings.HasPrefix(cred.TargetName, prefix) {
+			username := strings.TrimPrefix(cred.TargetName, prefix)
+			if username != "" {
+				users = append(users, username)
+			}
+		}
+	}
+	sort.Strings(users)
+	return slices.Compact(users), nil
+}
+
 // credName combines service and username to a single string.
 func (k windowsKeychain) credName(service, username string) string {
 	return service + ":" + username
 }
 
 func init() {
-	provider = windowsKeychain{}
+	p := windowsKeychain{}
+	provider = p
+	restoreProvider = func() { provider = p }
 }
 
 // Legacy provider methods retain the original Keyring interface.
@@ -130,4 +163,8 @@ func (k windowsKeychain) Delete(s, u string) error {
 }
 func (k windowsKeychain) DeleteAll(s string) error {
 	return k.DeleteAllWithContext(context.Background(), s)
+}
+
+func (k windowsKeychain) ListUsers(service string) ([]string, error) {
+	return k.ListUsersWithContext(context.Background(), service)
 }

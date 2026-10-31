@@ -2,10 +2,10 @@ package ss
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
-
-	"errors"
+	"unicode/utf8"
 
 	dbus "github.com/godbus/dbus/v5"
 )
@@ -34,11 +34,18 @@ type Secret struct {
 
 // NewSecret initializes a new Secret.
 func NewSecret(session dbus.ObjectPath, secret string) Secret {
+	value := []byte(secret)
+
+	contentType := "application/octet-stream"
+	if utf8.Valid(value) {
+		contentType = "text/plain; charset=utf-8"
+	}
+
 	return Secret{
 		Session:     session,
 		Parameters:  []byte{},
-		Value:       []byte(secret),
-		ContentType: "text/plain; charset=utf8",
+		Value:       value,
+		ContentType: contentType,
 	}
 }
 
@@ -298,6 +305,23 @@ func (s *SecretService) GetSecret(itemPath dbus.ObjectPath, session dbus.ObjectP
 	}
 
 	return &secret, nil
+}
+
+// GetItemAttributes gets the attributes of an item.
+func (s *SecretService) GetItemAttributes(itemPath dbus.ObjectPath) (map[string]string, error) {
+	obj := s.Object(serviceName, itemPath)
+	var variant dbus.Variant
+	err := obj.CallWithContext(s.ctx, "org.freedesktop.DBus.Properties.Get", 0, itemInterface, "Attributes").Store(&variant)
+	if err != nil {
+		return nil, err
+	}
+
+	attrs, ok := variant.Value().(map[string]string)
+	if !ok {
+		return nil, fmt.Errorf("failed to parse attributes")
+	}
+
+	return attrs, nil
 }
 
 // Delete deletes an item from the collection.

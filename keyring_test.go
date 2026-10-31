@@ -1,8 +1,11 @@
 package keyring
 
 import (
+	"fmt"
+	"log"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,7 +24,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv("KEYRING_OS_TEST") != "1" {
 		MockInit()
 	}
+	activeProvider := provider
 	code := m.Run()
+	provider = activeProvider
 	_ = DeleteAll(service)
 	os.Exit(code)
 }
@@ -197,4 +202,159 @@ func TestDeleteAllEmptyService(t *testing.T) {
 	if err == ErrNotFound {
 		t.Errorf("Should not have deleted secret from another service")
 	}
+}
+
+// TestListUsers tests listing all users for a service.
+func TestListUsers(t *testing.T) {
+	service2 := service + ".list"
+	t.Cleanup(func() { _ = DeleteAll(service2) })
+	err := Set(service2, "user1", "password1")
+	if err != nil {
+		t.Errorf("Should not fail, got: %s", err)
+	}
+
+	err = Set(service2, "user2", "password2")
+	if err != nil {
+		t.Errorf("Should not fail, got: %s", err)
+	}
+
+	err = Set(service2, "user3", "password3")
+	if err != nil {
+		t.Errorf("Should not fail, got: %s", err)
+	}
+
+	users, err := ListUsers(service2)
+	if err != nil {
+		t.Errorf("Should not fail, got: %s", err)
+	}
+
+	if len(users) != 3 {
+		t.Errorf("Expected 3 users, got %d", len(users))
+	}
+
+	expectedUsers := map[string]bool{"user1": true, "user2": true, "user3": true}
+	for _, user := range users {
+		if !expectedUsers[user] {
+			t.Errorf("Unexpected user: %s", user)
+		}
+		delete(expectedUsers, user)
+	}
+
+	if len(expectedUsers) > 0 {
+		t.Errorf("Missing users: %v", expectedUsers)
+	}
+
+	_ = DeleteAll(service2)
+}
+
+// TestListUsersEmpty tests listing users for a service with no secrets.
+func TestListUsersEmpty(t *testing.T) {
+	nonExistentService := service + ".missing"
+	users, err := ListUsers(nonExistentService)
+	if err != nil {
+		t.Errorf("Should not fail on empty service, got: %s", err)
+	}
+
+	if len(users) != 0 {
+		t.Errorf("Expected 0 users for non-existent service, got %d", len(users))
+	}
+}
+
+// TestListUsersSingleUser tests listing users for a service with a single user.
+func TestListUsersSingleUser(t *testing.T) {
+	service3 := service + ".single"
+	t.Cleanup(func() { _ = DeleteAll(service3) })
+	err := Set(service3, "single-user", "password")
+	if err != nil {
+		t.Errorf("Should not fail, got: %s", err)
+	}
+
+	users, err := ListUsers(service3)
+	if err != nil {
+		t.Errorf("Should not fail, got: %s", err)
+	}
+
+	if len(users) != 1 {
+		t.Fatalf("Expected 1 user, got %d", len(users))
+	}
+
+	if users[0] != "single-user" {
+		t.Errorf("Expected user 'single-user', got '%s'", users[0])
+	}
+
+	_ = Delete(service3, "single-user")
+}
+
+// ExampleListUsers demonstrates listing configured users for a service using the mock provider.
+// The example uses MockInit so it runs without requiring a system keyring.
+func ExampleListUsers() {
+	MockInit()
+	defer MockRestore()
+
+	service := "my-cli"
+
+	// Store some credentials
+	Set(service, "github", "ghp_token123")
+	Set(service, "gitlab", "glpat_token456")
+	Set(service, "aws", "aws_secret789")
+
+	// List all configured providers
+	users, err := ListUsers(service)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sort.Strings(users) // deterministic output for the example
+	fmt.Println("Configured providers:")
+	for _, u := range users {
+		fmt.Printf("  - %s\n", u)
+	}
+
+	// Output:
+	// Configured providers:
+	//   - aws
+	//   - github
+	//   - gitlab
+}
+
+// TestListUsersMultipleServices tests that ListUsers only returns users for the specified service.
+func TestListUsersMultipleServices(t *testing.T) {
+	serviceA := service + ".a"
+	serviceB := service + ".b"
+	t.Cleanup(func() { _ = DeleteAll(serviceA); _ = DeleteAll(serviceB) })
+
+	_ = Set(serviceA, "userA1", "passwordA1")
+	_ = Set(serviceA, "userA2", "passwordA2")
+	_ = Set(serviceB, "userB1", "passwordB1")
+
+	usersA, err := ListUsers(serviceA)
+	if err != nil {
+		t.Errorf("Should not fail, got: %s", err)
+	}
+
+	if len(usersA) != 2 {
+		t.Errorf("Expected 2 users for service A, got %d", len(usersA))
+	}
+
+	for _, user := range usersA {
+		if user == "userB1" {
+			t.Errorf("Service A should not include users from service B")
+		}
+	}
+
+	usersB, err := ListUsers(serviceB)
+	if err != nil {
+		t.Errorf("Should not fail, got: %s", err)
+	}
+
+	if len(usersB) != 1 {
+		t.Fatalf("Expected 1 user for service B, got %d", len(usersB))
+	}
+
+	if usersB[0] != "userB1" {
+		t.Errorf("Expected user 'userB1', got '%s'", usersB[0])
+	}
+
+	_ = DeleteAll(serviceA)
+	_ = DeleteAll(serviceB)
 }

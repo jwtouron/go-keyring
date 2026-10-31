@@ -5,6 +5,8 @@ package keyring
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sort"
 
 	dbus "github.com/godbus/dbus/v5"
 	ss "github.com/zalando/go-keyring/secret_service"
@@ -185,8 +187,51 @@ func (s secretServiceProvider) DeleteAllWithContext(ctx context.Context, service
 	return nil
 }
 
+// ListUsers returns a list of all users for a given service
+func (s secretServiceProvider) ListUsersWithContext(ctx context.Context, service string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if service == "" {
+		return []string{}, nil
+	}
+
+	svc, err := ss.NewSecretServiceWithContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	defer svc.Conn.Close()
+
+	items, err := s.findServiceItems(svc, service)
+	if err != nil {
+		if err == ErrNotFound {
+			return []string{}, nil // same empty-service semantics as DeleteAll
+		}
+		return nil, err
+	}
+
+	var users []string
+	for _, item := range items {
+		attrs, err := svc.GetItemAttributes(item)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		if username := attrs["username"]; username != "" {
+			users = append(users, username)
+		}
+	}
+	sort.Strings(users)
+	return slices.Compact(users), nil
+}
+
 func init() {
-	provider = secretServiceProvider{}
+	p := secretServiceProvider{}
+	provider = p
+	restoreProvider = func() { provider = p }
 }
 
 // Legacy provider methods retain the original Keyring interface.
@@ -201,4 +246,8 @@ func (k secretServiceProvider) Delete(s, u string) error {
 }
 func (k secretServiceProvider) DeleteAll(s string) error {
 	return k.DeleteAllWithContext(context.Background(), s)
+}
+
+func (s secretServiceProvider) ListUsers(service string) ([]string, error) {
+	return s.ListUsersWithContext(context.Background(), service)
 }

@@ -52,3 +52,14 @@ func (k fallbackServiceProvider) Delete(s, u string) error {
 func (k fallbackServiceProvider) DeleteAll(s string) error {
 	return k.DeleteAllWithContext(context.Background(), s)
 }
+
+func (fallbackServiceProvider) ListUsersWithContext(ctx context.Context, service string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, ErrUnsupportedPlatform
+}
+
+func (k fallbackServiceProvider) ListUsers(service string) ([]string, error) {
+	return k.ListUsersWithContext(context.Background(), service)
+}

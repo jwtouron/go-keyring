@@ -9,7 +9,6 @@ import (
 func TestContextMethodsRejectPreCancellation(t *testing.T) {
 	old := provider
 	defer func() { provider = old }()
-	MockInit()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	checks := []func() error{
@@ -17,14 +16,29 @@ func TestContextMethodsRejectPreCancellation(t *testing.T) {
 		func() error { _, err := GetWithContext(ctx, service, user); return err },
 		func() error { return DeleteWithContext(ctx, service, user) },
 		func() error { return DeleteAllWithContext(ctx, service) },
+		func() error { _, err := ListUsersWithContext(ctx, service); return err },
 	}
-	for _, call := range checks {
-		if err := call(); !errors.Is(err, context.Canceled) {
-			t.Fatal(err)
-		}
-	}
-	if _, err := Get(service, user); !errors.Is(err, ErrNotFound) {
-		t.Fatal("cancelled write reached backend", err)
+	for _, backend := range []string{"mock", "native", "fallback"} {
+		t.Run(backend, func(t *testing.T) {
+			switch backend {
+			case "mock":
+				MockInit()
+			case "native":
+				MockRestore()
+			case "fallback":
+				provider = fallbackServiceProvider{}
+			}
+			for _, call := range checks {
+				if err := call(); !errors.Is(err, context.Canceled) {
+					t.Fatal(err)
+				}
+			}
+			if backend == "mock" {
+				if _, err := Get(service, user); !errors.Is(err, ErrNotFound) {
+					t.Fatal("cancelled write reached backend", err)
+				}
+			}
+		})
 	}
 }
 
@@ -55,5 +69,24 @@ func TestCompletedMutationKeepsActualResult(t *testing.T) {
 	close(p.release)
 	if err := <-done; err != nil {
 		t.Fatal("completed mutation was misreported", err)
+	}
+}
+
+func TestListUsersWithContext(t *testing.T) {
+	old := provider
+	defer func() { provider = old }()
+	MockInit()
+	for _, name := range []string{"first", "second"} {
+		if err := Set(service, name, password); err != nil {
+			t.Fatal(err)
+		}
+	}
+	users, err := ListUsersWithContext(context.Background(), service)
+	if err != nil || len(users) != 2 {
+		t.Fatalf("users=%v err=%v", users, err)
+	}
+	MockInitWithError(ErrNotFound)
+	if _, err := ListUsersWithContext(context.Background(), service); !errors.Is(err, ErrNotFound) {
+		t.Fatal(err)
 	}
 }

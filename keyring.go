@@ -9,6 +9,9 @@ import (
 // keyring_unix.go
 var provider KeyringWithContext = fallbackServiceProvider{}
 
+// restoreProvider is set by platform init to restore the real provider after MockInit
+var restoreProvider func()
+
 var (
 	// ErrNotFound is the expected error if the secret isn't found in the
 	// keyring.
@@ -30,6 +33,8 @@ type Keyring interface {
 	Delete(service, user string) error
 	// DeleteAll deletes all secrets for a given service
 	DeleteAll(service string) error
+	// ListUsers returns a list of all users for a given service
+	ListUsers(service string) ([]string, error)
 }
 
 // KeyringWithContext provides cancellation where supported by the OS backend.
@@ -40,6 +45,7 @@ type KeyringWithContext interface {
 	GetWithContext(context.Context, string, string) (string, error)
 	DeleteWithContext(context.Context, string, string) error
 	DeleteAllWithContext(context.Context, string) error
+	ListUsersWithContext(context.Context, string) ([]string, error)
 }
 
 // Set stores a password using a background context.
@@ -78,4 +84,14 @@ func DeleteWithContext(ctx context.Context, service, user string) error {
 // DeleteAllWithContext removes a service's passwords and can complete partially.
 func DeleteAllWithContext(ctx context.Context, service string) error {
 	return provider.DeleteAllWithContext(ctx, service)
+}
+
+// ListUsers returns a list of all users for a given service
+func ListUsers(service string) ([]string, error) {
+	return ListUsersWithContext(context.Background(), service)
+}
+
+// ListUsersWithContext lists users, respecting cancellation supported by the backend.
+func ListUsersWithContext(ctx context.Context, service string) ([]string, error) {
+	return provider.ListUsersWithContext(ctx, service)
 }

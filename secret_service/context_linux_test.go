@@ -67,6 +67,71 @@ func (p *stalledSecret) GetSecret(dbus.ObjectPath) (Secret, *dbus.Error) {
 	return Secret{Value: []byte("synthetic")}, nil
 }
 
+type attributesFixture struct {
+	started, release chan struct{}
+	value            any
+}
+
+func (p *attributesFixture) Get(iface, property string) (dbus.Variant, *dbus.Error) {
+	if iface != itemInterface || property != "Attributes" {
+		return dbus.Variant{}, dbus.MakeFailedError(errors.New("unexpected property"))
+	}
+	close(p.started)
+	<-p.release
+	return dbus.MakeVariant(p.value), nil
+}
+
+func TestItemAttributesContextAndValidation(t *testing.T) {
+	for _, outcome := range []string{"cancel", "complete", "malformed"} {
+		t.Run(outcome, func(t *testing.T) {
+			server, base := fakeService(t)
+			fixture := &attributesFixture{
+				started: make(chan struct{}), release: make(chan struct{}),
+				value: map[string]string{"username": "synthetic"},
+			}
+			if outcome == "malformed" {
+				fixture.value = "invalid attributes"
+			}
+			defer close(fixture.release)
+			if err := server.Export(fixture, "/test/item", "org.freedesktop.DBus.Properties"); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(base)
+			defer cancel()
+			service, err := NewSecretServiceWithContext(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Conn.Close()
+			done := make(chan error, 1)
+			go func() {
+				attrs, err := service.GetItemAttributes("/test/item")
+				if outcome == "complete" && attrs["username"] != "synthetic" {
+					err = errors.New("attributes not preserved")
+				}
+				done <- err
+			}()
+			<-fixture.started
+			if outcome == "cancel" {
+				cancel()
+			} else {
+				fixture.release <- struct{}{}
+			}
+			select {
+			case err := <-done:
+				if outcome == "cancel" && !errors.Is(err, context.Canceled) {
+					t.Fatal(err)
+				}
+				if outcome == "complete" && err != nil || outcome == "malformed" && err == nil {
+					t.Fatalf("%s: %v", outcome, err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("attribute request did not finish")
+			}
+		})
+	}
+}
+
 func fakeService(t *testing.T) (*dbus.Conn, context.Context) {
 	t.Helper()
 	address := privateBus(t)
