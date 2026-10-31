@@ -1,3 +1,5 @@
+> BrowseFriend context-support fork: see [FORK.md](FORK.md) for API, cancellation, tests, and upstream maintenance.
+
 # Go Keyring library
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/zalando/go-keyring)](https://goreportcard.com/report/github.com/zalando/go-keyring)

@@ -1,0 +1,47 @@
+name: Check upstream
+on:
+  schedule:
+    - cron: '17 8 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+jobs:
+  propose:
+    if: github.repository == 'jwtouron/go-keyring'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Propose upstream merge and dispatch tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git remote add upstream https://github.com/zalando/go-keyring.git
+          git fetch upstream master
+          if git merge-base --is-ancestor upstream/master HEAD; then exit 0; fi
+          git switch -C sync/upstream
+          if ! git merge --no-edit upstream/master; then
+            git merge --abort
+            echo '::error::Upstream merge conflicts require review; the default branch was not changed.'
+            exit 1
+          fi
+          gh auth setup-git
+          git push --force-with-lease origin HEAD:refs/heads/sync/upstream
+          if ! gh pr view sync/upstream --json number >/dev/null 2>&1; then
+            gh pr create --base "$DEFAULT_BRANCH" --head sync/upstream --title 'Merge upstream go-keyring changes' --body 'Review the upstream diff and all native test results before merging. BrowseFriend continues using its pinned fork revision.'
+          fi
+          gh workflow run go.yml --ref sync/upstream

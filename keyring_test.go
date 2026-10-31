@@ -1,16 +1,30 @@
 package keyring
 
 import (
+	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
-	service  = "test-service"
-	user     = "test-user"
-	password = "test-password"
+	serviceBase = "go-keyring-synthetic"
+	user        = "test-user"
+	password    = "test-password"
 )
+
+var service = serviceBase + "." + strconv.Itoa(os.Getpid()) + "." + strconv.FormatInt(time.Now().UnixNano(), 36)
+
+func TestMain(m *testing.M) {
+	if os.Getenv("KEYRING_OS_TEST") != "1" {
+		MockInit()
+	}
+	code := m.Run()
+	_ = DeleteAll(service)
+	os.Exit(code)
+}
 
 // TestSet tests setting a user and password in the keyring.
 func TestSet(t *testing.T) {
@@ -21,6 +35,9 @@ func TestSet(t *testing.T) {
 }
 
 func TestSetTooLong(t *testing.T) {
+	if os.Getenv("KEYRING_OS_TEST") != "1" {
+		t.Skip("OS size limits require opt-in integration")
+	}
 	extraLongPassword := "ba" + strings.Repeat("na", 5000)
 	err := Set(service, user, extraLongPassword)
 

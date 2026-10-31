@@ -1,6 +1,7 @@
 package keyring
 
 import (
+	"context"
 	"strings"
 	"syscall"
 
@@ -10,7 +11,10 @@ import (
 type windowsKeychain struct{}
 
 // Get gets a secret from the keyring given a service name and a user.
-func (k windowsKeychain) Get(service, username string) (string, error) {
+func (k windowsKeychain) GetWithContext(ctx context.Context, service, username string) (string, error) {
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	cred, err := wincred.GetGenericCredential(k.credName(service, username))
 	if err != nil {
 		if err == syscall.ERROR_NOT_FOUND {
@@ -24,7 +28,10 @@ func (k windowsKeychain) Get(service, username string) (string, error) {
 
 // Set stores stores user and pass in the keyring under the defined service
 // name.
-func (k windowsKeychain) Set(service, username, password string) error {
+func (k windowsKeychain) SetWithContext(ctx context.Context, service, username, password string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	// password may not exceed 2560 bytes (https://github.com/jaraco/keyring/issues/540#issuecomment-968329967)
 	if len(password) > 2560 {
 		return ErrSetDataTooBig
@@ -48,7 +55,10 @@ func (k windowsKeychain) Set(service, username, password string) error {
 }
 
 // Delete deletes a secret, identified by service & user, from the keyring.
-func (k windowsKeychain) Delete(service, username string) error {
+func (k windowsKeychain) DeleteWithContext(ctx context.Context, service, username string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	cred, err := wincred.GetGenericCredential(k.credName(service, username))
 	if err != nil {
 		if err == syscall.ERROR_NOT_FOUND {
@@ -60,7 +70,10 @@ func (k windowsKeychain) Delete(service, username string) error {
 	return cred.Delete()
 }
 
-func (k windowsKeychain) DeleteAll(service string) error {
+func (k windowsKeychain) DeleteAllWithContext(ctx context.Context, service string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	// if service is empty, do nothing otherwise it might accidentally delete all secrets
 	if service == "" {
 		return ErrNotFound
@@ -75,6 +88,9 @@ func (k windowsKeychain) DeleteAll(service string) error {
 	deletedCount := 0
 
 	for _, cred := range creds {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if strings.HasPrefix(cred.TargetName, prefix) {
 			genericCred, err := wincred.GetGenericCredential(cred.TargetName)
 			if err != nil {
@@ -100,4 +116,18 @@ func (k windowsKeychain) credName(service, username string) string {
 
 func init() {
 	provider = windowsKeychain{}
+}
+
+// Legacy provider methods retain the original Keyring interface.
+func (k windowsKeychain) Get(s, u string) (string, error) {
+	return k.GetWithContext(context.Background(), s, u)
+}
+func (k windowsKeychain) Set(s, u, p string) error {
+	return k.SetWithContext(context.Background(), s, u, p)
+}
+func (k windowsKeychain) Delete(s, u string) error {
+	return k.DeleteWithContext(context.Background(), s, u)
+}
+func (k windowsKeychain) DeleteAll(s string) error {
+	return k.DeleteAllWithContext(context.Background(), s)
 }

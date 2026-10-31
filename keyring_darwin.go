@@ -15,10 +15,11 @@
 package keyring
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"strings"
 
@@ -26,115 +27,89 @@ import (
 )
 
 const (
-	execPathKeychain = "/usr/bin/security"
-
-	// encodingPrefix is a well-known prefix added to strings encoded by Set.
+	execPathKeychain     = "/usr/bin/security"
 	encodingPrefix       = "go-keyring-encoded:"
 	base64EncodingPrefix = "go-keyring-base64:"
 )
 
 type macOSXKeychain struct{}
 
-// func (*MacOSXKeychain) IsAvailable() bool {
-// 	return exec.Command(execPathKeychain).Run() != exec.ErrNotFound
-// }
+// runSecurity validates before spawning and always waits for the child to exit.
+func runSecurity(ctx context.Context, input string, args ...string) ([]byte, error) {
+	return runCommand(ctx, execPathKeychain, input, args...)
+}
 
-// Get password from macos keyring given service and user name.
-func (k macOSXKeychain) Get(service, username string) (string, error) {
-	out, err := exec.Command(
-		execPathKeychain,
-		"find-generic-password",
-		"-s", service,
-		"-wa", username).CombinedOutput()
+func (k macOSXKeychain) GetWithContext(ctx context.Context, service, username string) (string, error) {
+	out, err := runSecurity(ctx, "", "find-generic-password", "-s", service, "-wa", username)
 	if err != nil {
-		if strings.Contains(string(out), "could not be found") {
-			err = ErrNotFound
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 44 {
+			return "", ErrNotFound
 		}
 		return "", err
 	}
-
-	trimStr := strings.TrimSpace(string(out[:]))
-	// if the string has the well-known prefix, assume it's encoded
-	if strings.HasPrefix(trimStr, encodingPrefix) {
-		dec, err := hex.DecodeString(trimStr[len(encodingPrefix):])
-		return string(dec), err
-	} else if strings.HasPrefix(trimStr, base64EncodingPrefix) {
-		dec, err := base64.StdEncoding.DecodeString(trimStr[len(base64EncodingPrefix):])
-		return string(dec), err
+	value := strings.TrimSpace(string(out))
+	if strings.HasPrefix(value, encodingPrefix) {
+		decoded, err := hex.DecodeString(strings.TrimPrefix(value, encodingPrefix))
+		return string(decoded), err
 	}
-
-	return trimStr, nil
+	if strings.HasPrefix(value, base64EncodingPrefix) {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, base64EncodingPrefix))
+		return string(decoded), err
+	}
+	return value, nil
 }
 
-// Set stores a secret in the macos keyring given a service name and a user.
-func (k macOSXKeychain) Set(service, username, password string) error {
-	// if the added secret has multiple lines or some non ascii,
-	// osx will hex encode it on return. To avoid getting garbage, we
-	// encode all passwords
+func (k macOSXKeychain) SetWithContext(ctx context.Context, service, username, password string) error {
 	password = base64EncodingPrefix + base64.StdEncoding.EncodeToString([]byte(password))
-
-	cmd := exec.Command(execPathKeychain, "-i")
-	stdIn, err := cmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-
-	if err = cmd.Start(); err != nil {
-		return err
-	}
-
 	command := fmt.Sprintf("add-generic-password -U -s %s -a %s -w %s\n", shellescape.Quote(service), shellescape.Quote(username), shellescape.Quote(password))
-	if len(command) > 4096 {
+	if len(command) >= 4096 {
 		return ErrSetDataTooBig
 	}
-
-	if _, err := io.WriteString(stdIn, command); err != nil {
-		return err
-	}
-
-	if err = stdIn.Close(); err != nil {
-		return err
-	}
-
-	err = cmd.Wait()
+	_, err := runSecurity(ctx, command, "-i")
 	return err
 }
 
-// Delete deletes a secret, identified by service & user, from the keyring.
-func (k macOSXKeychain) Delete(service, username string) error {
-	out, err := exec.Command(
-		execPathKeychain,
-		"delete-generic-password",
-		"-s", service,
-		"-a", username).CombinedOutput()
-	if strings.Contains(string(out), "could not be found") {
-		err = ErrNotFound
+func (k macOSXKeychain) DeleteWithContext(ctx context.Context, service, username string) error {
+	_, err := runSecurity(ctx, "", "delete-generic-password", "-s", service, "-a", username)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 44 {
+		return ErrNotFound
 	}
 	return err
 }
 
-// DeleteAll deletes all secrets for a given service
-func (k macOSXKeychain) DeleteAll(service string) error {
-	// if service is empty, do nothing otherwise it might accidentally delete all secrets
+func (k macOSXKeychain) DeleteAllWithContext(ctx context.Context, service string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if service == "" {
 		return ErrNotFound
 	}
-	// Delete each secret in a while loop until there is no more left
-	// under the service
 	for {
-		out, err := exec.Command(
-			execPathKeychain,
-			"delete-generic-password",
-			"-s", service).CombinedOutput()
-		if strings.Contains(string(out), "could not be found") {
+		_, err := runSecurity(ctx, "", "delete-generic-password", "-s", service)
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 44 {
 			return nil
-		} else if err != nil {
+		}
+		if err != nil {
 			return err
 		}
 	}
-
 }
 
-func init() {
-	provider = macOSXKeychain{}
+func init() { provider = macOSXKeychain{} }
+
+// Legacy provider methods retain the original Keyring interface.
+func (k macOSXKeychain) Get(s, u string) (string, error) {
+	return k.GetWithContext(context.Background(), s, u)
+}
+func (k macOSXKeychain) Set(s, u, p string) error {
+	return k.SetWithContext(context.Background(), s, u, p)
+}
+func (k macOSXKeychain) Delete(s, u string) error {
+	return k.DeleteWithContext(context.Background(), s, u)
+}
+func (k macOSXKeychain) DeleteAll(s string) error {
+	return k.DeleteAllWithContext(context.Background(), s)
 }

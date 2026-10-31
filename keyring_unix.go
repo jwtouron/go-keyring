@@ -3,6 +3,7 @@
 package keyring
 
 import (
+	"context"
 	"fmt"
 
 	dbus "github.com/godbus/dbus/v5"
@@ -13,11 +14,12 @@ type secretServiceProvider struct{}
 
 // Set stores user and pass in the keyring under the defined service
 // name.
-func (s secretServiceProvider) Set(service, user, pass string) error {
-	svc, err := ss.NewSecretService()
+func (s secretServiceProvider) SetWithContext(ctx context.Context, service, user, pass string) error {
+	svc, err := ss.NewSecretServiceWithContext(ctx)
 	if err != nil {
 		return err
 	}
+	defer svc.Conn.Close()
 
 	// open a session
 	session, err := svc.OpenSession()
@@ -102,11 +104,12 @@ func (s secretServiceProvider) findServiceItems(svc *ss.SecretService, service s
 }
 
 // Get gets a secret from the keyring given a service name and a user.
-func (s secretServiceProvider) Get(service, user string) (string, error) {
-	svc, err := ss.NewSecretService()
+func (s secretServiceProvider) GetWithContext(ctx context.Context, service, user string) (string, error) {
+	svc, err := ss.NewSecretServiceWithContext(ctx)
 	if err != nil {
 		return "", err
 	}
+	defer svc.Conn.Close()
 
 	item, err := s.findItem(svc, service, user)
 	if err != nil {
@@ -135,11 +138,12 @@ func (s secretServiceProvider) Get(service, user string) (string, error) {
 }
 
 // Delete deletes a secret, identified by service & user, from the keyring.
-func (s secretServiceProvider) Delete(service, user string) error {
-	svc, err := ss.NewSecretService()
+func (s secretServiceProvider) DeleteWithContext(ctx context.Context, service, user string) error {
+	svc, err := ss.NewSecretServiceWithContext(ctx)
 	if err != nil {
 		return err
 	}
+	defer svc.Conn.Close()
 
 	item, err := s.findItem(svc, service, user)
 	if err != nil {
@@ -150,16 +154,17 @@ func (s secretServiceProvider) Delete(service, user string) error {
 }
 
 // DeleteAll deletes all secrets for a given service
-func (s secretServiceProvider) DeleteAll(service string) error {
+func (s secretServiceProvider) DeleteAllWithContext(ctx context.Context, service string) error {
 	// if service is empty, do nothing otherwise it might accidentally delete all secrets
 	if service == "" {
 		return ErrNotFound
 	}
 
-	svc, err := ss.NewSecretService()
+	svc, err := ss.NewSecretServiceWithContext(ctx)
 	if err != nil {
 		return err
 	}
+	defer svc.Conn.Close()
 	// find all items for the service
 	items, err := s.findServiceItems(svc, service)
 	if err != nil {
@@ -169,6 +174,9 @@ func (s secretServiceProvider) DeleteAll(service string) error {
 		return err
 	}
 	for _, item := range items {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		err = svc.Delete(item)
 		if err != nil {
 			return err
@@ -179,4 +187,18 @@ func (s secretServiceProvider) DeleteAll(service string) error {
 
 func init() {
 	provider = secretServiceProvider{}
+}
+
+// Legacy provider methods retain the original Keyring interface.
+func (k secretServiceProvider) Get(s, u string) (string, error) {
+	return k.GetWithContext(context.Background(), s, u)
+}
+func (k secretServiceProvider) Set(s, u, p string) error {
+	return k.SetWithContext(context.Background(), s, u, p)
+}
+func (k secretServiceProvider) Delete(s, u string) error {
+	return k.DeleteWithContext(context.Background(), s, u)
+}
+func (k secretServiceProvider) DeleteAll(s string) error {
+	return k.DeleteAllWithContext(context.Background(), s)
 }

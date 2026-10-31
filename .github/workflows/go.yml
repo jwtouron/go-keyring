@@ -1,113 +1,81 @@
 name: Go
-
 on:
   push:
-    branches: [ master ]
   pull_request:
-    branches: [ master ]
-
+  workflow_dispatch:
 permissions:
   contents: read
-
 jobs:
-  build-linux:
-    name: Build (ubuntu-latest)
-    runs-on: ubuntu-latest
-    container:
-      image: ubuntu:latest
-      options: --privileged
-      env:
-        DEBIAN_FRONTEND: noninteractive
-
-    permissions:
-      contents: read
-
-    steps:
-    - name: Check out code into $GITHUB_WORKSPACE directory
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-
-    - name: Set up Go
-      uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417
-      with:
-        go-version: ^1.22
-      id: go
-
-    - name: Install Dependencies
-      run: |
-        apt-get update
-        apt-get install -y gnome-keyring build-essential ca-certificates
-        mkdir -p /github/home/.cache/
-        mkdir -p /github/home/.local/share/keyrings/
-        chmod 700 -R /github/home/.local/
-
-    - name: Get dependencies
-      run: |
-        go get -v -t -d ./...
-
-    - name: Build
-      run: |
-        go build -v ./...
-
-    - name: Test
-      run: |
-        echo 'somecredstorepass' | gnome-keyring-daemon --unlock
-        go test -v ./...
-      shell: dbus-run-session -- bash --noprofile --norc -eo pipefail {0}
-
-  build-other:
-    name: Build
-    runs-on: ${{ matrix.os }}
+  native:
+    name: Native ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
-        os: [macOS-latest, windows-latest]
-
-    permissions:
-      contents: read
-
+        include:
+          - runner: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+            nodearch: x64
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            nodearch: arm64
+          - runner: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            nodearch: x64
+          - runner: macos-15
+            goos: darwin
+            goarch: arm64
+            nodearch: arm64
+          - runner: windows-2025
+            goos: windows
+            goarch: amd64
+            nodearch: x64
+          - runner: windows-11-arm
+            goos: windows
+            goarch: arm64
+            nodearch: arm64
+    env:
+      KEYRING_OS_TEST: '1'
+      CGO_ENABLED: ${{ matrix.goos == 'windows' && matrix.goarch == 'arm64' && '0' || '1' }}
     steps:
-    - name: Check out code into $GITHUB_WORKSPACE directory
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-
-    - name: Set up Go
-      uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417
-      with:
-        go-version: ^1.22
-      id: go
-
-    - name: Get dependencies
-      run: |
-        go get -v -t -d ./...
-
-    - name: Build
-      run: |
-        go build -v ./...
-
-    - name: Test
-      run: |
-        go test -v ./...
-
-  build-freebsd:
-    name: Build (FreeBSD)
-    # runs-on: macos-12
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-
-    steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-    - name: Test in FreeBSD
-      id: test
-      uses: vmactions/freebsd-vm@v1
-      with:
-        usesh: true
-        prepare: pkg install -y go gnome-keyring
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+          architecture: ${{ matrix.nodearch }}
+      - name: Install Linux credential store
+        if: runner.os == 'Linux'
         run: |
-          go version
-          go build -v
-          dbus-run-session -- sh -c "echo 'somecredstorepass' | gnome-keyring-daemon --unlock; go test -v ./..."
-          # verify that we can build for freebsd with cgo disabled
-          # This will disable the functionality as it depends on cgo (via
-          # godbus) but should still be buildable to not break backwards
-          # compatibility
-          CGO_ENABLED=0 go build -v
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends dbus-x11 gnome-keyring
+      - name: Configure Windows x64 race compiler
+        if: matrix.goos == 'windows' && matrix.goarch == 'amd64'
+        shell: pwsh
+        run: |
+          $compiler = (Get-Command gcc -ErrorAction Stop).Source
+          $target = & $compiler -dumpmachine
+          if ($LASTEXITCODE -ne 0 -or $target.Trim() -ne 'x86_64-w64-mingw32') { throw 'Native MinGW-w64 required.' }
+          "CC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Verify formatting, tests, and vet
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l .)"
+          race=(-race)
+          if [[ "${{ matrix.goos }}/${{ matrix.goarch }}" == 'windows/arm64' ]]; then race=(); fi
+          if [[ "$RUNNER_OS" == 'Linux' ]]; then
+            dbus-run-session -- bash -euo pipefail -c '
+              printf "%s" "synthetic-keyring-password" | gnome-keyring-daemon --unlock --components=secrets
+              go test -race -timeout=3m ./...
+            '
+          else
+            go test "${race[@]}" -timeout=3m ./...
+          fi
+          go vet ./...
+          git diff --exit-code

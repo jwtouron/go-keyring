@@ -1,7 +1,9 @@
 package ss
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"errors"
 
@@ -44,6 +46,7 @@ func NewSecret(session dbus.ObjectPath, secret string) Secret {
 type SecretService struct {
 	*dbus.Conn
 	object dbus.BusObject
+	ctx    context.Context
 }
 
 // NewSecretService inializes a new SecretService object.
@@ -56,14 +59,49 @@ func NewSecretService() (*SecretService, error) {
 	return &SecretService{
 		conn,
 		conn.Object(serviceName, servicePath),
+		context.Background(),
 	}, nil
+}
+
+// NewSecretServiceWithContext uses a private connection. The caller must close
+// Conn after the operation; cancellation must never close the shared session bus.
+func NewSecretServiceWithContext(ctx context.Context) (*SecretService, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	conn, err := dbus.SessionBusPrivateNoAutoStartup()
+	if err != nil {
+		return nil, err
+	}
+	// Interrupt authentication/Hello if the bus accepts a connection but stalls.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	err = conn.Auth(nil)
+	if err == nil {
+		err = conn.Hello()
+	}
+	stop()
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return &SecretService{Conn: conn, object: conn.Object(serviceName, servicePath), ctx: ctx}, nil
+}
+
+// cleanup gives resource release a short budget independent from cancellation.
+func (s *SecretService) cleanup(fn func(context.Context)) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	fn(ctx)
 }
 
 // OpenSession opens a secret service session.
 func (s *SecretService) OpenSession() (dbus.BusObject, error) {
 	var disregard dbus.Variant
 	var sessionPath dbus.ObjectPath
-	err := s.object.Call(serviceInterface+".OpenSession", 0, "plain", dbus.MakeVariant("")).Store(&disregard, &sessionPath)
+	err := s.object.CallWithContext(s.ctx, serviceInterface+".OpenSession", 0, "plain", dbus.MakeVariant("")).Store(&disregard, &sessionPath)
 	if err != nil {
 		return nil, err
 	}
@@ -75,11 +113,15 @@ func (s *SecretService) OpenSession() (dbus.BusObject, error) {
 // in the collection interface (and can be used).
 func (s *SecretService) CheckCollectionPath(path dbus.ObjectPath) error {
 	obj := s.Conn.Object(serviceName, servicePath)
-	val, err := obj.GetProperty(collectionsInterface)
+	var val dbus.Variant
+	err := obj.CallWithContext(s.ctx, "org.freedesktop.DBus.Properties.Get", 0, serviceInterface, "Collections").Store(&val)
 	if err != nil {
 		return err
 	}
-	paths := val.Value().([]dbus.ObjectPath)
+	paths, ok := val.Value().([]dbus.ObjectPath)
+	if !ok {
+		return errors.New("invalid collections response")
+	}
 	for _, p := range paths {
 		if p == path {
 			return nil
@@ -106,7 +148,7 @@ func (s *SecretService) GetLoginCollection() dbus.BusObject {
 func (s *SecretService) Unlock(collection dbus.ObjectPath) error {
 	var unlocked []dbus.ObjectPath
 	var prompt dbus.ObjectPath
-	err := s.object.Call(serviceInterface+".Unlock", 0, []dbus.ObjectPath{collection}).Store(&unlocked, &prompt)
+	err := s.object.CallWithContext(s.ctx, serviceInterface+".Unlock", 0, []dbus.ObjectPath{collection}).Store(&unlocked, &prompt)
 	if err != nil {
 		return err
 	}
@@ -131,7 +173,9 @@ func (s *SecretService) Unlock(collection dbus.ObjectPath) error {
 
 // Close closes a secret service dbus session.
 func (s *SecretService) Close(session dbus.BusObject) error {
-	return session.Call(sessionInterface+".Close", 0).Err
+	var err error
+	s.cleanup(func(ctx context.Context) { err = session.CallWithContext(ctx, sessionInterface+".Close", 0).Err })
+	return err
 }
 
 // CreateCollection with the supplied label.
@@ -140,7 +184,7 @@ func (s *SecretService) CreateCollection(label string) (dbus.BusObject, error) {
 		collectionInterface + ".Label": dbus.MakeVariant(label),
 	}
 	var collection, prompt dbus.ObjectPath
-	err := s.object.Call(serviceInterface+".CreateCollection", 0, properties, "").
+	err := s.object.CallWithContext(s.ctx, serviceInterface+".CreateCollection", 0, properties, "").
 		Store(&collection, &prompt)
 	if err != nil {
 		return nil, err
@@ -167,7 +211,7 @@ func (s *SecretService) CreateItem(collection dbus.BusObject, label string, attr
 	}
 
 	var item, prompt dbus.ObjectPath
-	err := collection.Call(collectionInterface+".CreateItem", 0,
+	err := collection.CallWithContext(s.ctx, collectionInterface+".CreateItem", 0,
 		properties, secret, true).Store(&item, &prompt)
 	if err != nil {
 		return err
@@ -185,43 +229,59 @@ func (s *SecretService) CreateItem(collection dbus.BusObject, label string, attr
 // triggering the prompt and waiting for the Secret service daemon to display
 // the prompt to the user.
 func (s *SecretService) handlePrompt(prompt dbus.ObjectPath) (bool, dbus.Variant, error) {
-	if prompt != dbus.ObjectPath("/") {
-		err := s.AddMatchSignal(dbus.WithMatchObjectPath(prompt),
-			dbus.WithMatchInterface(promptInterface),
-		)
-		if err != nil {
-			return false, dbus.MakeVariant(""), err
-		}
-
-		defer func(s *SecretService, options ...dbus.MatchOption) {
-			_ = s.RemoveMatchSignal(options...)
-		}(s, dbus.WithMatchObjectPath(prompt), dbus.WithMatchInterface(promptInterface))
-
-		promptSignal := make(chan *dbus.Signal, 1)
-		s.Signal(promptSignal)
-
-		err = s.Object(serviceName, prompt).Call(promptInterface+".Prompt", 0, "").Err
-		if err != nil {
-			return false, dbus.MakeVariant(""), err
-		}
-
-		signal := <-promptSignal
-		switch signal.Name {
-		case promptInterface + ".Completed":
-			dismissed := signal.Body[0].(bool)
-			result := signal.Body[1].(dbus.Variant)
-			return dismissed, result, nil
-		}
-
+	empty := dbus.MakeVariant("")
+	if prompt == dbus.ObjectPath("/") {
+		return false, empty, nil
 	}
-
-	return false, dbus.MakeVariant(""), nil
+	options := []dbus.MatchOption{dbus.WithMatchObjectPath(prompt), dbus.WithMatchInterface(promptInterface), dbus.WithMatchMember("Completed"), dbus.WithMatchSender(serviceName)}
+	if err := s.AddMatchSignalContext(s.ctx, options...); err != nil {
+		return false, empty, err
+	}
+	defer s.cleanup(func(ctx context.Context) { _ = s.RemoveMatchSignalContext(ctx, options...) })
+	signals := make(chan *dbus.Signal, 1)
+	s.Signal(signals)
+	defer s.RemoveSignal(signals)
+	dismiss := func() {
+		s.cleanup(func(ctx context.Context) {
+			_ = s.Object(serviceName, prompt).CallWithContext(ctx, promptInterface+".Dismiss", 0).Err
+		})
+	}
+	if err := s.Object(serviceName, prompt).CallWithContext(s.ctx, promptInterface+".Prompt", 0, "").Err; err != nil {
+		dismiss()
+		return false, empty, err
+	}
+	for {
+		select {
+		case <-s.ctx.Done():
+			dismiss()
+			return false, empty, s.ctx.Err()
+		case signal, ok := <-signals:
+			if !ok {
+				return false, empty, errors.New("secret service disconnected")
+			}
+			if signal == nil || signal.Path != prompt || signal.Name != promptInterface+".Completed" {
+				continue
+			}
+			if len(signal.Body) != 2 {
+				return false, empty, errors.New("invalid prompt response")
+			}
+			dismissed, valid := signal.Body[0].(bool)
+			result, valueOK := signal.Body[1].(dbus.Variant)
+			if !valid || !valueOK {
+				return false, empty, errors.New("invalid prompt response")
+			}
+			if dismissed {
+				return true, empty, errors.New("secret service prompt dismissed")
+			}
+			return false, result, nil
+		}
+	}
 }
 
 // SearchItems returns a list of items matching the search object.
 func (s *SecretService) SearchItems(collection dbus.BusObject, search interface{}) ([]dbus.ObjectPath, error) {
 	var results []dbus.ObjectPath
-	err := collection.Call(collectionInterface+".SearchItems", 0, search).Store(&results)
+	err := collection.CallWithContext(s.ctx, collectionInterface+".SearchItems", 0, search).Store(&results)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +292,7 @@ func (s *SecretService) SearchItems(collection dbus.BusObject, search interface{
 // GetSecret gets secret from an item in a given session.
 func (s *SecretService) GetSecret(itemPath dbus.ObjectPath, session dbus.ObjectPath) (*Secret, error) {
 	var secret Secret
-	err := s.Object(serviceName, itemPath).Call(itemInterface+".GetSecret", 0, session).Store(&secret)
+	err := s.Object(serviceName, itemPath).CallWithContext(s.ctx, itemInterface+".GetSecret", 0, session).Store(&secret)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +303,7 @@ func (s *SecretService) GetSecret(itemPath dbus.ObjectPath, session dbus.ObjectP
 // Delete deletes an item from the collection.
 func (s *SecretService) Delete(itemPath dbus.ObjectPath) error {
 	var prompt dbus.ObjectPath
-	err := s.Object(serviceName, itemPath).Call(itemInterface+".Delete", 0).Store(&prompt)
+	err := s.Object(serviceName, itemPath).CallWithContext(s.ctx, itemInterface+".Delete", 0).Store(&prompt)
 	if err != nil {
 		return err
 	}
